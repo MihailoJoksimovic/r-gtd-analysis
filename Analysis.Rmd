@@ -1,0 +1,141 @@
+---
+title: "Analysis"
+author: "Mihailo Joksimovic"
+date: "2/11/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(modelr)
+library(randomForest)
+
+read_csv('./globalterrorismdb_0718dist.csv') -> df
+
+small_set <- df %>% 
+  filter(iyear >= 2013, iday != 0, imonth != 0) %>% 
+  mutate(
+    imonth = as.factor(imonth), 
+    iday = as.factor(iday),
+    success = as.factor(success)
+  ) %>% 
+  mutate(
+    date = make_date(
+      iyear, 
+      as.numeric(levels(imonth))[imonth], # Proper way of converting factor to number
+      as.numeric(levels(iday))[iday]) # Proper way of converting factor to number
+  ) %>% 
+  select(eventid, date, everything())
+
+```
+
+## Basic info
+
+This analysis file is split into two main parts. First part is concerned with Exploratory Data Analysis, where
+we'll focus on exploring what we have inside the dataset, and the second part is concerned with predictions.
+
+## European Data
+
+We'll start our exploration by focusing on the data we have. Let's see what we have in this dataset.
+
+```{r df}
+ggplot(df, aes(x = iyear)) + geom_bar()
+```
+
+What we can see here is that data is being tracked from 1970s and there seems to be a single year that is missing.
+
+Let's see what the missing year is:
+
+```{r}
+df %>% filter(iyear > 1990, iyear < 2000) %>% distinct(iyear)
+```
+What we can see is that, for some reason, data seems to be missing for 1993. That's ok, I guess we can live with that.
+
+According to the official docs (<https://www.start.umd.edu/gtd/downloads/Codebook.pdf>), the best data has been collected starting from 2011. Therefore, for sake of ease and readability, let's focus on the period after 2011.
+
+```{r}
+small_set <- df %>% filter(iyear >= 2013)
+
+# How many observations do we have?
+count(small_set)
+```
+
+Let's see the # of attacks now and, for ease of analysis, let's facet it by Region
+
+```{r}
+ggplot(small_set, aes(iyear)) + geom_bar() + facet_wrap(~ region_txt)
+```
+
+That gives an interesting clue. So seems like Middle East, Nortf Africa and South Asia have higher number of attacks. We'll put a better focus on that later on.
+
+Let's see a # of attacks per region.
+
+```{r}
+by_region <- small_set %>%
+  group_by(region_txt) %>% 
+  summarise(n = n())
+
+ggplot(by_region) + 
+  geom_bar(aes(x = reorder(region_txt, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Region")
+```
+
+So we can confirm that previous observation makes sense really.
+
+Let's see what are the most affected countries actually.
+
+```{r}
+by_country <- small_set %>%
+  group_by(country_txt) %>% 
+  summarise(n = n()) %>% 
+  arrange(country_txt, desc(n)) %>% 
+  top_n(10, n)
+
+# Plot only top 10 countries ...
+ggplot(by_country) + 
+  geom_bar(aes(x = reorder(country_txt, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Region")
+```
+
+So seems like Iraq is the country with most registered attacks.
+
+Let's explore a bit more now. Which methods of attack are present?
+
+```{r}
+by_attacktype <- small_set %>% 
+  group_by(attacktype1_txt) %>% 
+  summarise(n = n())
+
+ggplot(by_attacktype) + 
+  geom_bar(aes(x = reorder(attacktype1_txt, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Attack Type")
+```
+
+So seems like Bombing & Explosion are favorite attack methods. After that comes the Armed Assault and then we have Kindapping. Well, the first one seems to be interesting to explore later on.
+
+What are the most used weapon types?
+
+```{r}
+by_weapontype <- small_set %>%
+  mutate(label = str_trunc(weaptype1_txt, 20)) %>% 
+  group_by(label) %>% 
+  summarise(n = n())
+
+ggplot(by_weapontype) + 
+  geom_bar(aes(x = reorder(label, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Weapon Type")
+```
+
+So explosive seems to be most commonly used means of attack.
+
