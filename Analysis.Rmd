@@ -12,8 +12,28 @@ library(tidyverse)
 library(lubridate)
 library(modelr)
 library(randomForest)
+library(forecast)
+library(tseries)
 
 read_csv('./globalterrorismdb_0718dist.csv') -> df
+
+df <- df %>% 
+  mutate(
+    date = make_date(
+      iyear, 
+      imonth, # Proper way of converting factor to number
+      iday # Proper way of converting factor to number
+  ),
+    month = month(imonth, label = TRUE)
+)
+
+# Some of the variables have to be converted to factors
+factor_cols = c("country", "region", "specificity", "attacktype1", 
+                "attacktype2", "attacktype3", "weaptype1", "weapsubtype1", "targtype1", "targsubtype1", 
+                "property", "propextent", "ishostkid", "INT_LOG", "INT_IDEO", "vicinity", "success", 
+                "suicide", "claimed")
+
+df[factor_cols] = lapply(df[factor_cols], factor)
 
 small_set <- df %>% 
   filter(iyear >= 2013, iday != 0, imonth != 0) %>% 
@@ -29,6 +49,7 @@ small_set <- df %>%
       as.numeric(levels(iday))[iday]) # Proper way of converting factor to number
   ) %>% 
   select(eventid, date, everything())
+
 
 ```
 
@@ -139,3 +160,410 @@ ggplot(by_weapontype) +
 
 So explosive seems to be most commonly used means of attack.
 
+Let's explore the Victim types
+
+```{r}
+by_weapontype <- small_set %>%
+  mutate(label = str_trunc(targtype1_txt, 20)) %>% 
+  group_by(label) %>% 
+  summarise(n = n())
+
+ggplot(by_weapontype) + 
+  geom_bar(aes(x = reorder(label, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Victim Type")
+```
+
+So most of the attacks were against the citizens. OK. Finally, let's see the number of attacks per attack group.
+
+```{r}
+by_attackgroup <- small_set %>%
+  filter(gname != "Unknown") %>% 
+  mutate(label = str_trunc(gname, 30)) %>% 
+  group_by(label) %>% 
+  summarise(n = n()) %>% 
+  arrange(label, desc(n)) %>% 
+  top_n(10, n)
+
+ggplot(by_attackgroup) + 
+  geom_bar(aes(x = reorder(label, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Victim Type")
+```
+
+Ok, now that we have this data, let's focus our EDA on the country that has highest number of attacks - Iraq.
+
+```{r}
+iraq <- small_set %>% 
+  filter(country_txt == "Iraq")
+
+count(iraq)
+```
+
+15k observations. That's nice. Let's plot number of attacks by year:
+
+```{r}
+ggplot(iraq, aes(iyear)) + geom_bar()
+```
+
+Is there any difference if we observe it on a monthly basis?
+
+```{r}
+daily <- iraq %>% group_by(date) %>% summarise(n = n())
+
+ggplot(iraq, aes(date)) + geom_histogram(binwidth = 20)
+```
+
+That doesn't give much clue ... Let's try Year vs Month
+
+```{r}
+ggplot(iraq) + geom_count(mapping = aes(x = imonth, y = iyear))
+```
+
+That doesn't give much clue ... Let's try a heatmap
+
+```{r}
+monthly <- iraq %>% 
+  mutate(month = month(date, label = TRUE)) %>% 
+  group_by(iyear, month) %>% 
+  summarise(n = n())
+
+ggplot(monthly) + geom_tile(mapping = aes(x = month, y = iyear, fill = n))
+```
+
+Still that gives no clue about anything ... Let's try the line plot
+
+```{r}
+daily <- iraq %>% 
+  group_by(date) %>% 
+  summarise(n = n()) %>% 
+  mutate(month = month(date, label = TRUE))
+
+ggplot(daily) + geom_line(mapping = aes(x = date, y = n))
+```
+
+Let's try plotting frequencies by month
+
+```{r}
+ggplot(daily) + geom_line(mapping = aes(x = date, y = n, color = month))
+```
+
+Ok this doesn't give absolutely any clue ... Let's try with Box plot
+
+```{r}
+ggplot(daily) +
+  geom_boxplot(aes(x = month, y = n))
+```
+
+So in average, it seems that, at least considering the 3 year period, every month has relatively the same number of attacks ...
+
+Let's try facetting by year, to see if there's anything useful in there.
+
+```{r}
+ggplot(daily) +
+  geom_boxplot(aes(x = month, y = n)) +
+  facet_wrap (~ year(date))
+```
+
+That doesn't seem much helpful ... Let's try and put an emphasis on 2017th.
+
+```{r}
+iraq_2017 <- iraq %>% filter(iyear == 2017)
+
+count(iraq_2017)
+```
+
+2000 observations. That should be solid. Let's plot the frequency by date now
+
+```{r}
+daily <- iraq_2017 %>% 
+  group_by(date) %>% 
+  summarise(n = n())
+
+ggplot(daily, aes(date, n)) + 
+  geom_line(colour = "grey50") +
+  geom_smooth(se = FALSE, span = 0.20)
+```
+
+So if we try modeling based on the month, let's see how are the residuals going to look like.
+
+Let's see if there's an influence of the day of the week?
+
+```{r}
+daily <- daily %>% 
+  mutate(wday = wday(date, label = TRUE))
+
+ggplot(daily, aes(wday, n)) + 
+  geom_boxplot()
+```
+
+Doesn't seem that day of the week has much effect either.
+
+Let's actually see number of attacks, per month. Maybe we can dig a bit more there.
+
+```{r}
+ggplot(iraq_2017, aes(x = month)) + geom_bar()
+```
+
+Seems like there is a relatively higher number of attacks in the first half of the year but that's mostly it. Nothing spectacular.
+
+Let's explore the most common attack types in Iraq:
+
+```{r}
+by_weapontype <- iraq_2017 %>%
+  mutate(label = str_trunc(weaptype1_txt, 20)) %>% 
+  group_by(label) %>% 
+  summarise(n = n())
+
+ggplot(by_weapontype) + 
+  geom_bar(aes(x = reorder(label, n), y = n), stat = "identity") + 
+  coord_flip() +
+  xlab("Count") +
+  ylab("Weapon Type")
+```
+
+So Explosive seems to be most commonly used attack method ... Let's see if there is any trend in it.
+
+```{r}
+daily <- iraq_2017 %>% 
+  filter(weaptype1_txt == "Explosives") %>% 
+  group_by(date, weaptype1) %>% 
+  summarise(n = n())
+
+ggplot(daily, aes(date, n)) + 
+  geom_line(colour = "grey50") +
+  geom_smooth(se = FALSE, span = 0.20)
+```
+
+Well, the trend is the same as # of attacks, which, kind of makes sense considering the fact that Bombing is mostly used method of attack ... Time to try something else.
+
+## Using ARIMA for forecasting # of attacks
+
+Let's try using ARIMA for forecasing # of attacks. It should be noted that this is more of an experimental approach than actual implementation, considering the fact that I'm not really familiar with ARIMA.
+
+First, we'll try cleaning the outliers
+
+```{r}
+count_ts = ts(daily[, c('n')])
+
+daily$clean_cnt = tsclean(count_ts)
+
+ggplot(daily, aes(x = date)) +
+  geom_line(aes(y = clean_cnt), alpha = 0.7, color = "blue") + ylab('Cleaned Count') +
+  geom_line(aes(y = n), alpha = 0.1)
+
+```
+
+As it can be seen, some of the outliers have been removed. Let's try smoothing the series by calculating the moving average.
+
+```{r}
+daily$cnt_ma = ma(daily$clean_cnt, order=7) # using the clean count with no outliers
+daily$cnt_ma30 = ma(daily$clean_cnt, order=30)
+
+ggplot(daily, aes(x = date)) +
+  geom_line(aes(y = clean_cnt, colour = "Counts")) +
+  geom_line(aes(y = cnt_ma,   colour = "Weekly Moving Average"))  +
+  geom_line(aes(y = cnt_ma30, colour = "Monthly Moving Average"))  +
+  ylab('Attack Count')
+```
+
+Now let's decompose the data
+
+```{r}
+count_ma = ts(na.omit(daily$cnt_ma), frequency=30)
+decomp = stl(count_ma, s.window="periodic")
+deseasonal_cnt <- seasadj(decomp)
+plot(decomp)
+```
+
+```{r}
+count_d1 = diff(deseasonal_cnt, differences = 2)
+adf.test(count_d1, alternative = "stationary")
+plot(count_d1)
+```
+
+```{r}
+fit<-auto.arima(deseasonal_cnt, seasonal=FALSE)
+tsdisplay(residuals(fit), lag.max=45, main='(1,1,1) Model Residuals')
+```
+
+Let's try with better parameters
+
+```{r}
+fit2 = arima(deseasonal_cnt, order=c(1,1,7))
+
+fit2
+
+tsdisplay(residuals(fit2), lag.max=15, main='Seasonal Model Residuals')
+```
+
+```{r}
+hold <- window(ts(deseasonal_cnt), start=300)
+
+fit_no_holdout = arima(ts(deseasonal_cnt[-c(300:353)]), order=c(1,1,7))
+
+fcast_no_holdout <- forecast(fit_no_holdout,h=25)
+plot(fcast_no_holdout, main=" ")
+lines(ts(deseasonal_cnt))
+```
+What we can see is that predicted values are not that bad, but still it's far from ideal.
+
+## Predicting success of attack
+
+What I'm going to try next is predicting the "successfulnes" of attack, based on input features. I'll be using logistic regression for this task.
+
+First, let's split the data into Train, CV and Test sets
+
+```{r}
+train_set <- slice(small_set, 1:50000)
+cv_set <- slice(small_set, 50001:65000) 
+test_set <- slice(small_set, 65000:n())
+```
+
+How many attacks have succeeded vs failed?
+
+```{r}
+train_set %>% group_by(success) %>% summarise(n = n()) %>% mutate(ratio = n * 100 / sum(n))
+```
+
+So most of the attacks from this set have been succcessful actually. Was it somehow correlated with a year?
+
+```{r}
+ggplot(train_set, aes(x = iyear)) + geom_bar(aes(fill = success))
+```
+
+Doesn't seem so. What if we faceted by region?
+
+```{r}
+ggplot(train_set, aes(x = iyear)) + geom_histogram(aes(fill = success)) + facet_wrap(~region_txt)
+```
+
+Still nothing spectacular. Let's plot daily stats:
+
+```{r}
+daily <- train_set %>% group_by(date) %>% summarise(count = n())
+
+ggplot(daily, aes(x = date, y = count)) + geom_line()
+```
+
+Except some outliers, it doesn't seem to be giving much info either. What if looked on monthly basis?
+
+```{r}
+ggplot(train_set) + geom_bar(aes(x = month(date))) + facet_wrap(~ region_txt)
+```
+
+Nope. All months seem to be equally affected. Is there any correlation between region and successfulnes of attack?
+
+```{r}
+ggplot(train_set) + geom_bar(aes(x = iyear, fill = success)) + facet_wrap(~ region_txt)
+```
+
+Again, doesn't appear to be so ... What about the day of the week?
+
+```{r}
+train_set <- train_set %>% mutate(dow = wday(date, label=TRUE))
+
+ggplot(train_set) + geom_bar(aes(x=dow, fill = success))
+```
+
+Again, pretty evenly distributed. Could there be a correlation between type of attack and successfulnes of it?
+
+```{r}
+by_attacktype <- train_set %>% group_by(attacktype1_txt) %>% summarise(count = n())
+
+ggplot(train_set) + 
+  geom_bar(aes(x = attacktype1_txt, fill = success)) + 
+  coord_flip()
+```
+
+Again, it seems that mostly the attacks are always successful and not a big correlation could be discovered. I'll just blindly try training a Logistic Regression model and see how it performs
+
+```{r}
+# Some functions that appared to be repetitive
+
+train_model <- function(formula) {
+  model <- glm(formula, data = train_set, family=binomial(link='logit'))
+}
+
+get_train_score <- function(model) {
+  get_f1_score_on_set(model, train_set)
+}
+
+get_cv_score <- function(model) {
+  get_f1_score_on_set(model, cv_set)
+}
+
+get_test_score <- function(model) {
+  get_f1_score_on_set(model, test_set)
+}
+
+get_f1_score_on_set <- function(model, set) {
+  predicted <- predict(model, set)
+  predicted <- ifelse(predicted > 0.5, 1, 0)
+  
+  t1<-table(predicted, set$success)
+  
+  presicion<- t1[1,1]/(sum(t1[1,]))
+  recall<- t1[1,1]/(sum(t1[,1]))
+  
+  F1<- 2*presicion*recall/(presicion+recall)
+  
+  F1
+}
+
+get_accuracies <- function(model) {
+  # model <- train_model(formula)
+  print(paste("Train F1 score: ", get_train_score(model)))
+  print(paste("CV F1 score: ", get_cv_score(model)))
+  print(paste("Test F1 score: ", get_test_score(model)))
+  
+  get_test_score(model)
+}
+
+# Train the model!
+mod1 <- glm(success ~ attacktype1 + iday + imonth + INT_LOG + vicinity + claimed, data = train_set, family=binomial(link='logit'))
+get_accuracies(mod1)
+
+```
+
+As can be seen, we've got a really bad F1 score. This means that our model is pretty much quite bad.
+
+Let's try something different. Let's model based on each feature and compare the F1 scores.
+
+```{r}
+# Function that takes vector of features as input and produces a tibble with F1 scores
+build_scores <- function(features) {
+  scores <- tribble(
+    ~formula_features,
+    ~f1_score
+  )
+  
+  for (feature in features) {
+    print("Trying out a following model: ")
+    print(paste("success ~ ", feature))
+    
+    formula <- as.formula(paste("success ~ ", feature))
+    
+    model <- glm(formula, data = train_set, family=binomial(link='logit'))
+    
+    get_accuracies(model)
+    
+    F1 = get_test_score(model)
+    
+    scores <- add_row(scores, formula_features = feature, f1_score = F1)
+    
+    print("")
+    print("")
+  }
+  
+  scores
+}
+
+features = c("attacktype1", "iday", "imonth", "INT_LOG", "vicinity", "claimed", "longitude", "latitude", "longitude * latitude", "longitude * latitude + claimed")
+
+build_scores(features) %>% arrange(desc(f1_score))
+```
+
+So seems like that all of the features generally carry low F1 score ... What I successfully validated is that I can build a model, but I can't (yet) build a one that gives good results ...
